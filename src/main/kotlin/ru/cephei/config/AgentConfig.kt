@@ -1,41 +1,48 @@
 package ru.cephei.config
 
-import ai.koog.prompt.executor.clients.openai.OpenAILLMClient
-import ai.koog.prompt.executor.clients.openai.OpenAIModels
 import ai.koog.prompt.executor.clients.anthropic.AnthropicLLMClient
 import ai.koog.prompt.executor.clients.anthropic.AnthropicModels
+import ai.koog.prompt.executor.clients.openai.OpenAIClientSettings
+import ai.koog.prompt.executor.clients.openai.OpenAILLMClient
+import ai.koog.prompt.executor.clients.openai.OpenAIModels
 import ai.koog.prompt.executor.llms.MultiLLMPromptExecutor
+import ai.koog.prompt.llm.LLMCapability
+import ai.koog.prompt.llm.LLMProvider
 import ai.koog.prompt.llm.LLModel
 
 /**
- * Центральная конфигурация агента.
+ * Кастомный провайдер для LMStudio — OpenAI-совместимый локальный сервер.
  *
- * Хранит константы (промпты, лимиты итераций), фабричные методы для создания
- * LLM-executor-ов и выбора моделей.
+ * Используется как ключ в [MultiLLMPromptExecutor], чтобы не конфликтовать
+ * с настоящим [LLMProvider.OpenAI] при наличии обоих клиентов в одном executor-е.
+ */
+private class LMStudioLLMProvider : LLMProvider("lmstudio", "LMStudio")
+
+/**
+ * Центральная конфигурация агента: константы, фабрики executor-ов и моделей.
  *
- * API-ключи читаются исключительно из переменных окружения:
- *   - OPENAI_API_KEY   — ключ OpenAI (обязателен)
- *   - ANTHROPIC_API_KEY — ключ Anthropic (опционально, для расширенного режима)
+ * ## Поддерживаемые провайдеры
+ * | Провайдер | Метод              | Env-переменная       |
+ * |-----------|--------------------|----------------------|
+ * | OpenAI    | [createOpenAIExecutor]    | `OPENAI_API_KEY`     |
+ * | Anthropic | [createAnthropicExecutor] | `ANTHROPIC_API_KEY`  |
+ * | LMStudio  | [createLMStudioExecutor]  | не требуется         |
  *
- * Установить перед запуском:
- *   Windows : set OPENAI_API_KEY=sk-...
- *   Linux   : export OPENAI_API_KEY=sk-...
+ * API-ключи читаются исключительно из переменных окружения — не хардкодятся.
  */
 object AgentConfig {
 
     /**
-     * Максимальное количество итераций агента за один вызов [run].
-     * Ограничивает глубину рекурсии при вызовах тулов, защищая от бесконечных циклов.
+     * Максимальное количество итераций агента за один вызов `run`.
+     * Защищает от бесконечных циклов при вызовах тулов.
      */
     const val MAX_ITERATIONS = 30
 
     /**
-     * Системный промпт для агента-аналитика логов.
+     * Системный промпт агента-аналитика логов.
      *
-     * Определяет:
-     * - роль агента (эксперт по анализу логов)
-     * - ожидаемый формат ответа (Markdown-отчёт)
-     * - приоритетность уровней (ERROR > WARN > INFO)
+     * Определяет роль, приоритет уровней (ERROR > WARN > INFO) и
+     * требование выводить отчёт в формате Markdown.
      */
     val SYSTEM_PROMPT = """
         You are an expert log analysis agent.
@@ -52,47 +59,100 @@ object AgentConfig {
         Always respond in the same language as the user's request.
     """.trimIndent()
 
+    // ── Singleton провайдер для LMStudio ────────────────────────────────────────
+    //
+    // Используем один и тот же экземпляр как ключ в executor-е
+    // и как `provider` в LLModel — иначе поиск по Map не сработает.
+
+    /** Провайдер-синглтон для LMStudio. */
+    val LMSTUDIO_PROVIDER: LLMProvider = LMStudioLLMProvider()
+
+    // ── Фабрики executor-ов ─────────────────────────────────────────────────────
+
     /**
-     * Создаёт [MultiLLMPromptExecutor] с поддержкой OpenAI и Anthropic.
+     * Создаёт executor только с OpenAI-клиентом.
      *
-     * [MultiLLMPromptExecutor] автоматически маршрутизирует запросы к нужному провайдеру
-     * на основе переданной модели — поэтому один executor поддерживает оба.
-     *
-     * @return executor, готовый к передаче в [AIAgent]
-     * @throws IllegalStateException если OPENAI_API_KEY не задана
+     * @throws IllegalStateException если `OPENAI_API_KEY` не задана
      */
-    fun createExecutor(): MultiLLMPromptExecutor {
-        val openAiKey = System.getenv("OPENAI_API_KEY")
-            ?: error("OPENAI_API_KEY environment variable is not set. Please set it before running.")
-
-        // Anthropic опционален — если ключ не задан, используется только OpenAI
-        val anthropicKey = System.getenv("ANTHROPIC_API_KEY")
-
-        return if (anthropicKey != null) {
-            MultiLLMPromptExecutor(
-                OpenAILLMClient(openAiKey),
-                AnthropicLLMClient(anthropicKey)
-            )
-        } else {
-            MultiLLMPromptExecutor(OpenAILLMClient(openAiKey))
-        }
+    fun createOpenAIExecutor(): MultiLLMPromptExecutor {
+        val key = requireEnv("OPENAI_API_KEY")
+        return MultiLLMPromptExecutor(LLMProvider.OpenAI to OpenAILLMClient(key))
     }
 
     /**
-     * Основная модель для анализа логов — GPT-4o.
+     * Создаёт executor только с Anthropic-клиентом.
      *
-     * Хорошо справляется со структурированным выводом, анализом текста
-     * и следованием сложным инструкциям.
+     * @throws IllegalStateException если `ANTHROPIC_API_KEY` не задана
+     */
+    fun createAnthropicExecutor(): MultiLLMPromptExecutor {
+        val key = requireEnv("ANTHROPIC_API_KEY")
+        return MultiLLMPromptExecutor(LLMProvider.Anthropic to AnthropicLLMClient(key))
+    }
+
+    /**
+     * Создаёт executor + модель для LMStudio (OpenAI-совместимый локальный сервер).
      *
-     * @return [LLModel] для передачи в [AIAgent]
+     * LMStudio не требует реального API-ключа — передаём placeholder.
+     * Кастомный [LMSTUDIO_PROVIDER] гарантирует, что этот клиент не перепутается
+     * с реальным OpenAI, если оба окажутся в одном executor-е.
+     *
+     * @param baseUrl  базовый URL сервера LMStudio, например `http://localhost:1234`
+     * @param modelId  имя загруженной модели, как показано в LMStudio UI
+     * @return пара (executor, модель) — оба используют [LMSTUDIO_PROVIDER]
+     */
+    fun createLMStudioExecutor(
+        baseUrl: String = "http://localhost:1234",
+        modelId: String = "lmstudio-local",
+    ): Pair<MultiLLMPromptExecutor, LLModel> {
+        val client = OpenAILLMClient(
+            apiKey   = "lm-studio",                         // LMStudio игнорирует ключ
+            settings = OpenAIClientSettings(baseUrl = baseUrl),
+        )
+        val executor = MultiLLMPromptExecutor(LMSTUDIO_PROVIDER to client)
+        val model = LLModel(
+            provider     = LMSTUDIO_PROVIDER,
+            id           = modelId,
+            capabilities = listOf(
+                LLMCapability.Temperature,
+                LLMCapability.Tools,
+                LLMCapability.ToolChoice,
+                LLMCapability.Schema.JSON.Basic,
+            ),
+        )
+        return executor to model
+    }
+
+    // ── Дефолтная модель (используется в тестах и CI без интерактивного выбора) ──
+
+    /**
+     * Дефолтная облачная модель — GPT-4o.
+     * Используется только если [ModelSelector] не вызывается (например, в тестах).
      */
     fun defaultModel(): LLModel = OpenAIModels.Chat.GPT4o
 
     /**
-     * Альтернативная модель — Anthropic Claude Sonnet 4.5.
-     * Рекомендуется для задач с интенсивным вызовом тулов.
+     * Дефолтный executor с обоими провайдерами (OpenAI + Anthropic), если оба ключа заданы.
+     * Используется для тестов и обратной совместимости.
      *
-     * @return [LLModel] для передачи в [AIAgent]
+     * @throws IllegalStateException если `OPENAI_API_KEY` не задана
      */
-    fun anthropicModel(): LLModel = AnthropicModels.Sonnet_4_5
+    fun createExecutor(): MultiLLMPromptExecutor {
+        val openAiKey     = requireEnv("OPENAI_API_KEY")
+        val anthropicKey  = System.getenv("ANTHROPIC_API_KEY")
+
+        return if (anthropicKey != null) {
+            MultiLLMPromptExecutor(
+                LLMProvider.OpenAI    to OpenAILLMClient(openAiKey),
+                LLMProvider.Anthropic to AnthropicLLMClient(anthropicKey),
+            )
+        } else {
+            MultiLLMPromptExecutor(LLMProvider.OpenAI to OpenAILLMClient(openAiKey))
+        }
+    }
+
+    // ── Утилиты ─────────────────────────────────────────────────────────────────
+
+    private fun requireEnv(name: String): String =
+        System.getenv(name)
+            ?: error("Переменная окружения $name не задана. Установите её перед запуском:\n  Windows: set $name=...\n  Linux:   export $name=...")
 }

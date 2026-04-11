@@ -5,6 +5,7 @@ import ai.koog.agents.core.tools.ToolRegistry
 import ai.koog.agents.features.eventHandler.feature.EventHandler
 import kotlinx.coroutines.runBlocking
 import ru.cephei.config.AgentConfig
+import ru.cephei.config.ModelSelector
 import ru.cephei.strategy.createLogAnalysisStrategy
 import java.io.File
 
@@ -44,13 +45,18 @@ fun main(args: Array<String>) = runBlocking {
     println("Анализирую: ${logFile.absolutePath}")
     println()
 
+    // Интерактивный выбор модели: OpenAI / Anthropic / LMStudio
+    val modelConfig = ModelSelector.select()
+    println("Модель: ${modelConfig.displayName}")
+    println()
+
     // Создаём граф-стратегию: chunker → analyzer → reporter
     val strategy = createLogAnalysisStrategy()
 
     // Создаём агента с граф-стратегией (ToolRegistry не нужен для граф-нод без тулов)
     val agent = AIAgent(
-        promptExecutor = AgentConfig.createExecutor(),
-        llmModel       = AgentConfig.defaultModel(),
+        promptExecutor = modelConfig.executor,
+        llmModel       = modelConfig.model,
         systemPrompt   = AgentConfig.SYSTEM_PROMPT,
         toolRegistry   = ToolRegistry.EMPTY,
         strategy       = strategy,
