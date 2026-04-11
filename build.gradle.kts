@@ -1,5 +1,8 @@
+val koog_version: String by project
+
 plugins {
-    kotlin("jvm") version "2.0.0"
+    kotlin("jvm") version "2.3.0"
+    kotlin("plugin.serialization") version "2.3.0"
 }
 
 group = "ru.cephei"
@@ -10,6 +13,10 @@ repositories {
 }
 
 dependencies {
+    implementation("ai.koog:koog-agents:$koog_version")
+    implementation("ai.koog:agents-ext-jvm:$koog_version")
+    implementation("ch.qos.logback:logback-classic:1.5.16")
+
     testImplementation(kotlin("test"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
 }
